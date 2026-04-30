@@ -1,0 +1,688 @@
+diff --git a/POKEMON_SUBMISSION.md b/POKEMON_SUBMISSION.md
+new file mode 100644
+index 0000000000..4d73a42dab
+--- /dev/null
++++ b/POKEMON_SUBMISSION.md
+@@ -0,0 +1,82 @@
++# Pokemon PokeAPI n8n Node Submission
++
++## Approach
++
++I added a new built-in `Pokemon` node in `packages/nodes-base` as a small public API integration with no credentials required.
++
++The node exposes one resource, `Pokemon`, with two operations:
++
++- `Get Many`: lists Pokemon from `GET /api/v2/pokemon`
++- `Get`: fetches a single Pokemon from `GET /api/v2/pokemon/{nameOrId}`
++
++Implementation choices:
++
++- I followed the existing public-API node pattern used by nodes like `HackerNews`, with a small `GenericFunctions.ts` request helper and an imperative `execute()` implementation.
++- `Get Many` follows n8n conventions by returning one output item per listed Pokemon rather than returning the raw wrapper object with `count`, `next`, and `previous`.
++- I added `Return All`, `Limit`, and `Offset` for the list operation so the node is usable both for quick pagination and for full dataset retrieval.
++- I kept the single-record lookup intentionally simple by accepting a single string field, `Pokemon Name or ID`, because PokeAPI accepts either form on the same endpoint.
++
++## Assumptions
++
++- A built-in node in `packages/nodes-base` is the expected delivery format for “make PokeAPI available in workflows”.
++- No authentication is needed because the requested PokeAPI endpoints are publicly accessible.
++- Returning one item per Pokemon for the list operation is preferable to returning the raw list envelope because that matches common n8n node behavior for “Get Many”.
++- Supporting both name and ID through one input is sufficient for the “Get one Pokemon by name or ID” requirement.
++
++## Testing
++
++I added a node harness test with mocked HTTP responses using `nock`:
++
++- `List Pokemon` with `limit=2` and `offset=1`
++- `Get Pokemon By Name` with `pikachu`
++- `Get Pokemon By ID` with `25`
++
++Validation commands I ran:
++
++```bash
++pushd packages/nodes-base
++pnpm test -- Pokemon.node.test.ts
++NODE_OPTIONS='--max-old-space-size=8192' pnpm lint
++pnpm typecheck
++pnpm build > pokemon-build.log 2>&1
++popd
++```
++
++Notes on the validation run:
++
++- `pnpm lint` completed successfully when rerun with a larger Node heap in this environment.
++- The lint command prints existing repository warnings from `validate-load-options-methods.js` and `validate-schema-versions.js`; those warnings are unrelated to the Pokemon node changes.
++- The package build completed successfully and generated updated node definitions.
++
++I also verified the live API shape during implementation with:
++
++```bash
++curl -s 'https://pokeapi.co/api/v2/pokemon?limit=2&offset=1' | jq
++curl -s 'https://pokeapi.co/api/v2/pokemon/pikachu' | jq
++curl -s 'https://pokeapi.co/api/v2/pokemon/25' | jq
++```
++
++## What I Would Do With More Time
++
++- Add a `resourceLocator` or load-options powered selector for Pokemon names to improve UX for manual node configuration.
++- Add an operation for related PokeAPI resources like species, abilities, or types if product scope expanded.
++- Add a second test covering `Return All` pagination over multiple mocked pages.
++- Add docs collateral for the built-in node page if this were being prepared for merge.
++
++## AI Usage
++
++### Model used
++
++- OpenAI Codex, a GPT-5-based coding agent available in the workspace environment.
++
++### Why this model
++
++- It was already integrated with the repository workspace, so I could inspect existing node patterns, edit the code, run tests, and generate a patch from one place without context switching.
++
++### Prompts sent to AI during the exercise
++
++This exercise was completed directly in the Codex workspace, so there was not a separate chain of external AI prompts beyond the task brief and repository instructions.
++
++The effective prompt used for implementation was:
++
++> Implement a new built-in n8n node for PokeAPI in `packages/nodes-base` that lets users list Pokemon and fetch a single Pokemon by name or ID. Keep the implementation consistent with existing public API nodes, add targeted automated tests, and include submission notes covering approach, assumptions, testing, what you would do with more time, and AI/tool usage.
+diff --git a/packages/nodes-base/nodes/Pokemon/GenericFunctions.ts b/packages/nodes-base/nodes/Pokemon/GenericFunctions.ts
+new file mode 100644
+index 0000000000..57bc4ed39a
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/GenericFunctions.ts
+@@ -0,0 +1,98 @@
++import type {
++	IDataObject,
++	IExecuteFunctions,
++	IHookFunctions,
++	IHttpRequestMethods,
++	ILoadOptionsFunctions,
++	IRequestOptions,
++	JsonObject,
++} from 'n8n-workflow';
++import { NodeApiError } from 'n8n-workflow';
++
++interface PokemonListResult {
++	name: string;
++	url: string;
++}
++
++interface PokemonListResponse {
++	count: number;
++	next: string | null;
++	previous: string | null;
++	results: PokemonListResult[];
++}
++
++function isObjectLiteral(value: unknown): value is Record<string, unknown> {
++	return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function isPokemonListResult(value: unknown): value is PokemonListResult {
++	if (!isObjectLiteral(value)) {
++		return false;
++	}
++
++	return typeof value.name === 'string' && typeof value.url === 'string';
++}
++
++export function isPokemonListResponse(value: unknown): value is PokemonListResponse {
++	if (!isObjectLiteral(value)) {
++		return false;
++	}
++
++	return (
++		typeof value.count === 'number' &&
++		(value.next === null || typeof value.next === 'string') &&
++		(value.previous === null || typeof value.previous === 'string') &&
++		Array.isArray(value.results) &&
++		value.results.every(isPokemonListResult)
++	);
++}
++
++export async function pokemonApiRequest(
++	this: IHookFunctions | IExecuteFunctions | ILoadOptionsFunctions,
++	method: IHttpRequestMethods,
++	endpoint: string,
++	qs: IDataObject = {},
++): Promise<unknown> {
++	const options: IRequestOptions = {
++		method,
++		qs,
++		uri: `https://pokeapi.co/api/v2${endpoint}`,
++		json: true,
++	};
++
++	try {
++		return await this.helpers.request(options);
++	} catch (error) {
++		const errorData: JsonObject =
++			error instanceof Error ? { message: error.message } : { message: 'Unknown PokeAPI error' };
++		throw new NodeApiError(this.getNode(), errorData);
++	}
++}
++
++export async function pokemonApiRequestAllItems(
++	this: IHookFunctions | IExecuteFunctions | ILoadOptionsFunctions,
++	startOffset: number,
++): Promise<PokemonListResult[]> {
++	const returnData: PokemonListResult[] = [];
++	let offset = startOffset;
++	let responseData: unknown;
++
++	do {
++		responseData = await pokemonApiRequest.call(this, 'GET', '/pokemon', {
++			limit: 100,
++			offset,
++		});
++
++		if (!isPokemonListResponse(responseData)) {
++			const errorData: JsonObject = {
++				message: 'Unexpected response format returned by PokeAPI when listing Pokemon',
++			};
++			throw new NodeApiError(this.getNode(), errorData);
++		}
++
++		returnData.push(...responseData.results);
++		offset += responseData.results.length;
++	} while (isPokemonListResponse(responseData) && responseData.next !== null);
++
++	return returnData;
++}
+diff --git a/packages/nodes-base/nodes/Pokemon/Pokemon.node.json b/packages/nodes-base/nodes/Pokemon/Pokemon.node.json
+new file mode 100644
+index 0000000000..088952d097
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/Pokemon.node.json
+@@ -0,0 +1,14 @@
++{
++	"node": "n8n-nodes-base.pokemon",
++	"nodeVersion": "1.0",
++	"codexVersion": "1.0",
++	"categories": ["Miscellaneous", "Utility"],
++	"resources": {
++		"primaryDocumentation": [
++			{
++				"url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.pokemon/"
++			}
++		],
++		"generic": []
++	}
++}
+diff --git a/packages/nodes-base/nodes/Pokemon/Pokemon.node.ts b/packages/nodes-base/nodes/Pokemon/Pokemon.node.ts
+new file mode 100644
+index 0000000000..8ca85ca9cb
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/Pokemon.node.ts
+@@ -0,0 +1,268 @@
++import type {
++	IDataObject,
++	IExecuteFunctions,
++	INodeExecutionData,
++	INodeType,
++	INodeTypeDescription,
++} from 'n8n-workflow';
++import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
++
++import {
++	isPokemonListResponse,
++	pokemonApiRequest,
++	pokemonApiRequestAllItems,
++} from './GenericFunctions';
++
++function isDataObject(value: unknown): value is IDataObject {
++	return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++export class Pokemon implements INodeType {
++	description: INodeTypeDescription = {
++		displayName: 'Pokemon',
++		name: 'pokemon',
++		icon: 'file:pokemon.svg',
++		group: ['transform'],
++		version: 1,
++		subtitle: '={{ $parameter["operation"] + ": " + $parameter["resource"] }}',
++		description: 'Consume the PokeAPI',
++		defaults: {
++			name: 'Pokemon',
++		},
++		usableAsTool: true,
++		inputs: [NodeConnectionTypes.Main],
++		outputs: [NodeConnectionTypes.Main],
++		properties: [
++			{
++				displayName: 'Resource',
++				name: 'resource',
++				type: 'options',
++				noDataExpression: true,
++				options: [
++					{
++						name: 'Pokemon',
++						value: 'pokemon',
++					},
++				],
++				default: 'pokemon',
++			},
++			{
++				displayName: 'Operation',
++				name: 'operation',
++				type: 'options',
++				noDataExpression: true,
++				displayOptions: {
++					show: {
++						resource: ['pokemon'],
++					},
++				},
++				options: [
++					{
++						name: 'Get',
++						value: 'get',
++						description: 'Get one Pokemon by name or ID',
++						action: 'Get a Pokemon',
++					},
++					{
++						name: 'Get Many',
++						value: 'getAll',
++						description: 'List Pokemon',
++						action: 'List Pokemon',
++					},
++				],
++				default: 'getAll',
++			},
++			{
++				displayName: 'Pokemon Name or ID',
++				name: 'pokemonNameOrId',
++				type: 'string',
++				required: true,
++				default: '',
++				placeholder: 'pikachu or 25',
++				description: 'The Pokemon name or numeric ID to retrieve',
++				displayOptions: {
++					show: {
++						resource: ['pokemon'],
++						operation: ['get'],
++					},
++				},
++			},
++			{
++				displayName: 'Return All',
++				name: 'returnAll',
++				type: 'boolean',
++				default: false,
++				description: 'Whether to return all results or only up to a given limit',
++				displayOptions: {
++					show: {
++						resource: ['pokemon'],
++						operation: ['getAll'],
++					},
++				},
++			},
++			{
++				displayName: 'Limit',
++				name: 'limit',
++				type: 'number',
++				typeOptions: {
++					minValue: 1,
++				},
++				default: 20,
++				description: 'Max number of results to return',
++				displayOptions: {
++					show: {
++						resource: ['pokemon'],
++						operation: ['getAll'],
++						returnAll: [false],
++					},
++				},
++			},
++			{
++				displayName: 'Offset',
++				name: 'offset',
++				type: 'number',
++				typeOptions: {
++					minValue: 0,
++				},
++				default: 0,
++				description: 'Number of Pokemon to skip before returning results',
++				displayOptions: {
++					show: {
++						resource: ['pokemon'],
++						operation: ['getAll'],
++					},
++				},
++			},
++		],
++	};
++
++	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
++		const items = this.getInputData();
++		const returnData: INodeExecutionData[] = [];
++
++		const getStringNodeParameter = (name: string, itemIndex: number): string => {
++			const value = this.getNodeParameter(name, itemIndex);
++
++			if (typeof value !== 'string') {
++				throw new NodeOperationError(this.getNode(), `Expected "${name}" to be a string`, {
++					itemIndex,
++				});
++			}
++
++			return value;
++		};
++
++		const getNumberNodeParameter = (name: string, itemIndex: number): number => {
++			const value = this.getNodeParameter(name, itemIndex);
++
++			if (typeof value !== 'number') {
++				throw new NodeOperationError(this.getNode(), `Expected "${name}" to be a number`, {
++					itemIndex,
++				});
++			}
++
++			return value;
++		};
++
++		const getBooleanNodeParameter = (name: string, itemIndex: number): boolean => {
++			const value = this.getNodeParameter(name, itemIndex);
++
++			if (typeof value !== 'boolean') {
++				throw new NodeOperationError(this.getNode(), `Expected "${name}" to be a boolean`, {
++					itemIndex,
++				});
++			}
++
++			return value;
++		};
++
++		for (let i = 0; i < items.length; i++) {
++			try {
++				const resource = getStringNodeParameter('resource', i);
++				const operation = getStringNodeParameter('operation', i);
++
++				if (resource !== 'pokemon') {
++					throw new NodeOperationError(this.getNode(), `The resource "${resource}" is unknown`, {
++						itemIndex: i,
++					});
++				}
++
++				let responseItems: IDataObject[];
++
++				if (operation === 'get') {
++					const pokemonNameOrId = getStringNodeParameter('pokemonNameOrId', i).trim();
++					const responseData = await pokemonApiRequest.call(
++						this,
++						'GET',
++						`/pokemon/${encodeURIComponent(pokemonNameOrId)}`,
++					);
++
++					if (!isDataObject(responseData)) {
++						throw new NodeOperationError(
++							this.getNode(),
++							'Unexpected response format returned by PokeAPI when fetching a Pokemon',
++							{ itemIndex: i },
++						);
++					}
++
++					responseItems = [responseData];
++				} else if (operation === 'getAll') {
++					const offset = getNumberNodeParameter('offset', i);
++					const returnAll = getBooleanNodeParameter('returnAll', i);
++
++					if (returnAll) {
++						const allPokemon = await pokemonApiRequestAllItems.call(this, offset);
++						responseItems = allPokemon.map((pokemon) => ({
++							name: pokemon.name,
++							url: pokemon.url,
++						}));
++					} else {
++						const limit = getNumberNodeParameter('limit', i);
++						const responseData = await pokemonApiRequest.call(this, 'GET', '/pokemon', {
++							limit,
++							offset,
++						});
++
++						if (!isPokemonListResponse(responseData)) {
++							throw new NodeOperationError(
++								this.getNode(),
++								'Unexpected response format returned by PokeAPI when listing Pokemon',
++								{ itemIndex: i },
++							);
++						}
++
++						responseItems = responseData.results.map((pokemon) => ({
++							name: pokemon.name,
++							url: pokemon.url,
++						}));
++					}
++				} else {
++					throw new NodeOperationError(this.getNode(), `The operation "${operation}" is unknown`, {
++						itemIndex: i,
++					});
++				}
++
++				const executionData = this.helpers.constructExecutionMetaData(
++					this.helpers.returnJsonArray(responseItems),
++					{ itemData: { item: i } },
++				);
++
++				returnData.push(...executionData);
++			} catch (error) {
++				if (this.continueOnFail()) {
++					const message = error instanceof Error ? error.message : 'Unknown error';
++					const executionErrorData = this.helpers.constructExecutionMetaData(
++						this.helpers.returnJsonArray({ error: message }),
++						{ itemData: { item: i } },
++					);
++					returnData.push(...executionErrorData);
++					continue;
++				}
++
++				throw error;
++			}
++		}
++
++		return [returnData];
++	}
++}
+diff --git a/packages/nodes-base/nodes/Pokemon/pokemon.svg b/packages/nodes-base/nodes/Pokemon/pokemon.svg
+new file mode 100644
+index 0000000000..44c2dada95
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/pokemon.svg
+@@ -0,0 +1,7 @@
++<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
++	<circle cx="32" cy="32" r="28" fill="#ffffff" stroke="#1f2937" stroke-width="4"/>
++	<path d="M8 32C8 18.7452 18.7452 8 32 8C45.2548 8 56 18.7452 56 32H8Z" fill="#ef4444"/>
++	<path d="M8 32H56" stroke="#1f2937" stroke-width="4"/>
++	<circle cx="32" cy="32" r="9" fill="#ffffff" stroke="#1f2937" stroke-width="4"/>
++	<circle cx="32" cy="32" r="3" fill="#1f2937"/>
++</svg>
+diff --git a/packages/nodes-base/nodes/Pokemon/test/Pokemon.node.test.ts b/packages/nodes-base/nodes/Pokemon/test/Pokemon.node.test.ts
+new file mode 100644
+index 0000000000..a32114e577
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/test/Pokemon.node.test.ts
+@@ -0,0 +1,56 @@
++import { NodeTestHarness } from '@nodes-testing/node-test-harness';
++import nock from 'nock';
++
++describe('Test Pokemon Node', () => {
++	const pokemonNock = nock('https://pokeapi.co');
++
++	beforeAll(() => {
++		pokemonNock
++			.get('/api/v2/pokemon')
++			.query({
++				limit: 2,
++				offset: 1,
++			})
++			.reply(200, {
++				count: 1350,
++				next: 'https://pokeapi.co/api/v2/pokemon?offset=3&limit=2',
++				previous: 'https://pokeapi.co/api/v2/pokemon?offset=0&limit=1',
++				results: [
++					{
++						name: 'ivysaur',
++						url: 'https://pokeapi.co/api/v2/pokemon/2/',
++					},
++					{
++						name: 'venusaur',
++						url: 'https://pokeapi.co/api/v2/pokemon/3/',
++					},
++				],
++			});
++
++		pokemonNock.get('/api/v2/pokemon/pikachu').reply(200, {
++			id: 25,
++			name: 'pikachu',
++			height: 4,
++			weight: 60,
++			species: {
++				name: 'pikachu',
++			},
++		});
++
++		pokemonNock.get('/api/v2/pokemon/25').reply(200, {
++			id: 25,
++			name: 'pikachu',
++			height: 4,
++			weight: 60,
++			species: {
++				name: 'pikachu',
++			},
++		});
++	});
++
++	afterAll(() => pokemonNock.done());
++
++	new NodeTestHarness().setupTests({
++		workflowFiles: ['Pokemon.workflow.test.json'],
++	});
++});
+diff --git a/packages/nodes-base/nodes/Pokemon/test/Pokemon.workflow.test.json b/packages/nodes-base/nodes/Pokemon/test/Pokemon.workflow.test.json
+new file mode 100644
+index 0000000000..e37d455217
+--- /dev/null
++++ b/packages/nodes-base/nodes/Pokemon/test/Pokemon.workflow.test.json
+@@ -0,0 +1,109 @@
++{
++	"name": "Test Pokemon",
++	"nodes": [
++		{
++			"parameters": {},
++			"name": "Execute Workflow",
++			"type": "n8n-nodes-base.manualTrigger",
++			"typeVersion": 1,
++			"position": [620, 440]
++		},
++		{
++			"parameters": {
++				"resource": "pokemon",
++				"operation": "getAll",
++				"returnAll": false,
++				"limit": 2,
++				"offset": 1
++			},
++			"name": "List Pokemon",
++			"type": "n8n-nodes-base.pokemon",
++			"typeVersion": 1
++		},
++		{
++			"parameters": {
++				"resource": "pokemon",
++				"operation": "get",
++				"pokemonNameOrId": "pikachu"
++			},
++			"name": "Get Pokemon By Name",
++			"type": "n8n-nodes-base.pokemon",
++			"typeVersion": 1
++		},
++		{
++			"parameters": {
++				"resource": "pokemon",
++				"operation": "get",
++				"pokemonNameOrId": "25"
++			},
++			"name": "Get Pokemon By ID",
++			"type": "n8n-nodes-base.pokemon",
++			"typeVersion": 1
++		}
++	],
++	"pinData": {
++		"List Pokemon": [
++			{
++				"json": {
++					"name": "ivysaur",
++					"url": "https://pokeapi.co/api/v2/pokemon/2/"
++				}
++			},
++			{
++				"json": {
++					"name": "venusaur",
++					"url": "https://pokeapi.co/api/v2/pokemon/3/"
++				}
++			}
++		],
++		"Get Pokemon By Name": [
++			{
++				"json": {
++					"id": 25,
++					"name": "pikachu",
++					"height": 4,
++					"weight": 60,
++					"species": {
++						"name": "pikachu"
++					}
++				}
++			}
++		],
++		"Get Pokemon By ID": [
++			{
++				"json": {
++					"id": 25,
++					"name": "pikachu",
++					"height": 4,
++					"weight": 60,
++					"species": {
++						"name": "pikachu"
++					}
++				}
++			}
++		]
++	},
++	"connections": {
++		"Execute Workflow": {
++			"main": [
++				[
++					{
++						"node": "List Pokemon",
++						"type": "main",
++						"index": 0
++					},
++					{
++						"node": "Get Pokemon By Name",
++						"type": "main",
++						"index": 0
++					},
++					{
++						"node": "Get Pokemon By ID",
++						"type": "main",
++						"index": 0
++					}
++				]
++			]
++		}
++	}
++}
+diff --git a/packages/nodes-base/package.json b/packages/nodes-base/package.json
+index ddc32ee648..f5d05b7d67 100644
+--- a/packages/nodes-base/package.json
++++ b/packages/nodes-base/package.json
+@@ -721,6 +721,7 @@
+       "dist/nodes/Pipedrive/Pipedrive.node.js",
+       "dist/nodes/Pipedrive/PipedriveTrigger.node.js",
+       "dist/nodes/Plivo/Plivo.node.js",
++      "dist/nodes/Pokemon/Pokemon.node.js",
+       "dist/nodes/PostBin/PostBin.node.js",
+       "dist/nodes/Postgres/Postgres.node.js",
+       "dist/nodes/Postgres/PostgresTrigger.node.js",

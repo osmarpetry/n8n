@@ -1,0 +1,109 @@
+{
+	"name": "Test Pokemon",
+	"nodes": [
+		{
+			"parameters": {},
+			"name": "Execute Workflow",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [620, 440]
+		},
+		{
+			"parameters": {
+				"resource": "pokemon",
+				"operation": "getAll",
+				"returnAll": false,
+				"limit": 2,
+				"offset": 1
+			},
+			"name": "List Pokemon",
+			"type": "n8n-nodes-base.pokemon",
+			"typeVersion": 1
+		},
+		{
+			"parameters": {
+				"resource": "pokemon",
+				"operation": "get",
+				"pokemonNameOrId": "pikachu"
+			},
+			"name": "Get Pokemon By Name",
+			"type": "n8n-nodes-base.pokemon",
+			"typeVersion": 1
+		},
+		{
+			"parameters": {
+				"resource": "pokemon",
+				"operation": "get",
+				"pokemonNameOrId": "25"
+			},
+			"name": "Get Pokemon By ID",
+			"type": "n8n-nodes-base.pokemon",
+			"typeVersion": 1
+		}
+	],
+	"pinData": {
+		"List Pokemon": [
+			{
+				"json": {
+					"name": "ivysaur",
+					"url": "https://pokeapi.co/api/v2/pokemon/2/"
+				}
+			},
+			{
+				"json": {
+					"name": "venusaur",
+					"url": "https://pokeapi.co/api/v2/pokemon/3/"
+				}
+			}
+		],
+		"Get Pokemon By Name": [
+			{
+				"json": {
+					"id": 25,
+					"name": "pikachu",
+					"height": 4,
+					"weight": 60,
+					"species": {
+						"name": "pikachu"
+					}
+				}
+			}
+		],
+		"Get Pokemon By ID": [
+			{
+				"json": {
+					"id": 25,
+					"name": "pikachu",
+					"height": 4,
+					"weight": 60,
+					"species": {
+						"name": "pikachu"
+					}
+				}
+			}
+		]
+	},
+	"connections": {
+		"Execute Workflow": {
+			"main": [
+				[
+					{
+						"node": "List Pokemon",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Get Pokemon By Name",
+						"type": "main",
+						"index": 0
+					},
+					{
+						"node": "Get Pokemon By ID",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	}
+}

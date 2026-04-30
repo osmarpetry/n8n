@@ -1,0 +1,14 @@
+{
+	"node": "n8n-nodes-base.pokemon",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["Miscellaneous", "Utility"],
+	"resources": {
+		"primaryDocumentation": [
+			{
+				"url": "https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.pokemon/"
+			}
+		],
+		"generic": []
+	}
+}
